@@ -36,7 +36,7 @@ class NodeUpdate1(nn.Module):
         self.test = test
 
     def forward(self, node):
-        h = node.data['mid']
+        h = node.data.pop('mid')
 
         h = self.linear(h)
 
@@ -51,12 +51,12 @@ class GCNSampling1(nn.Module):
             self.dropout = nn.Dropout(p=dropout)
         else:
             self.dropout = None
-        self.apply_mod = NodeApplyModule(in_feats, out_feats, activation)
+        self.apply_mod = NodeUpdate1(in_feats, out_feats, activation)
 
     def forward(self, g):
         g.ndata['mid'] = g.ndata['features']
         g.apply_nodes(func=self.apply_mod)  # 线性变换, 针对 h
-        g.ndata.pop['mid']
+
 
 
 class NodeUpdate(nn.Module):
@@ -81,23 +81,45 @@ class NodeUpdate(nn.Module):
 
 
 class GCNSampling2(nn.Module):
-    def __init__(self, n_hidden, n_classes, dropout):
+    def __init__(self,
+                 in_feats,
+                 n_hidden,
+                 n_classes,
+                 n_layers,
+                 activation,
+                 dropout):
         super(GCNSampling2, self).__init__()
-
+        self.n_layers = n_layers
         if dropout != 0:
             self.dropout = nn.Dropout(p=dropout)
         else:
             self.dropout = None
         self.layers = nn.ModuleList()
+        # input layer
+        skip_start = (0 == n_layers - 1)
+        self.layers.append(NodeUpdate(in_feats, n_hidden, activation))
+        # hidden layers
+        for i in range(1, n_layers):
+            skip_start = (i == n_layers - 1)
+            self.layers.append(NodeUpdate(n_hidden, n_hidden, activation))
         # output layer
         self.layers.append(NodeUpdate(n_hidden, n_classes))
 
-    def forward(self, nf):
+    def forward(self, nf):  # 虽然有两层，但是forward只用了一层
         nf.layers[0].data['activation'] = nf.layers[0].data['features']
 
         for i, layer in enumerate(self.layers):
-            if i == 1:
+            print(i)
+            if i == 0:  # 第一层只做加法
                 h = nf.layers[i].data.pop('activation')
+                if self.dropout:
+                    h = self.dropout(h)
+                nf.layers[i].data['h'] = h
+                nf.block_compute(i,
+                                 fn.copy_src(src='h', out='m'),
+                                 lambda node: {'h': node.mailbox['m'].mean(dim=1)})
+            else:
+                h = nf.layers[i].data.pop('h')
                 if self.dropout:
                     h = self.dropout(h)
                 nf.layers[i].data['h'] = h
@@ -135,6 +157,7 @@ class GCNInfer(nn.Module):
         for i, layer in enumerate(self.layers):
             h = nf.layers[i].data.pop('activation')
             nf.layers[i].data['h'] = h
+            print(len(nf.layers[i].data['h'][0]))
             nf.block_compute(i,
                              fn.copy_src(src='h', out='m'),
                              fn.sum(msg='m', out='h'),
@@ -226,11 +249,9 @@ for i in range(N):
             sub_train_id[i].append(sub_node_list[i][j])
 
 '''加载所有的初始化模型，作为各方model的全局模型'''
-print('111111111111111111111')
 Model = []
 for index7 in range(N):
     Model.append(torch.load('model1.pkl'))  # 全局模型包含每方的模型，且全都对他们进行相同的初始化
-print('2222222222222222222222')
 '''##########     训练的总节点      ############'''
 send_index1 = [1, 2, 3, 4]
 b = 0
@@ -238,8 +259,8 @@ b = 0
 '''自己方生成的子图'''
 self_list = sub_node_list[b]
 self_labels = sub_labels[b]
-self_labels = torch.LongTensor(self_labels)
-self_labels.cuda()
+# self_labels = torch.LongTensor(self_labels)
+# self_labels.cuda()
 self_g = g.subgraph(self_list)
 self_g.copy_from_parent()
 self_g.readonly()
@@ -249,7 +270,7 @@ if cuda:
     model1.cuda()
 
 model1(self_g)
-self_g.copy_to_paren()
+self_g.copy_to_parent()
 
 fc = nn.Linear(in_features=in_feats, out_features=n_hidden, bias=True)
 # fc.weight = nn.Parameter(Model[0]['layers.0.linear.weight'])
@@ -264,9 +285,10 @@ for in2 in range(len(send_index1)):  # 第 send_index[in2] 方
         g.nodes[sub_node_list[send_index1[in2]][in3]].data['fff'] = \
             fc(g.nodes[sub_node_list[send_index1[in2]][in3]].data['features'])
 
-g.ndata.pop['features']
+
 g.ndata['features'] = g.ndata['fff']
-g.ndata.pop['fff']
+g.ndata.pop('fff')
+
 
 '''自己方大的子图'''
 send_index = send_index1
@@ -297,7 +319,7 @@ new_train_id = np.array(new_train_id)
 
 # '''training'''
 
-model2 = GCNSampling2(n_hidden, n_classes, dropout)
+model2 = GCNSampling2(in_feats, n_hidden, n_classes, n_layers, F.relu, dropout)
 #
 if cuda:
     model2.cuda()
