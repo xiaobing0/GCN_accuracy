@@ -82,10 +82,8 @@ class NodeUpdate(nn.Module):
 
 class GCNSampling2(nn.Module):
     def __init__(self,
-                 in_feats,
                  n_hidden,
                  n_classes,
-                 n_layers,
                  activation,
                  dropout):
         super(GCNSampling2, self).__init__()
@@ -95,38 +93,31 @@ class GCNSampling2(nn.Module):
         else:
             self.dropout = None
         self.layers = nn.ModuleList()
-        # input layer
-        skip_start = (0 == n_layers - 1)
-        self.layers.append(NodeUpdate(in_feats, n_hidden, activation))
-        # hidden layers
-        for i in range(1, n_layers):
-            skip_start = (i == n_layers - 1)
-            self.layers.append(NodeUpdate(n_hidden, n_hidden, activation))
-        # output layer
+
         self.layers.append(NodeUpdate(n_hidden, n_classes))
 
-    def forward(self, nf):  # 虽然有两层，但是forward只用了一层
+    def forward(self, nf):
         nf.layers[0].data['activation'] = nf.layers[0].data['features']
 
         for i, layer in enumerate(self.layers):
             print(i)
-            if i == 0:  # 第一层只做加法
-                h = nf.layers[i].data.pop('activation')
-                if self.dropout:
-                    h = self.dropout(h)
-                nf.layers[i].data['h'] = h
-                nf.block_compute(i,
-                                 fn.copy_src(src='h', out='m'),
-                                 lambda node: {'h': node.mailbox['m'].mean(dim=1)})
-            else:
-                h = nf.layers[i].data.pop('h')
-                if self.dropout:
-                    h = self.dropout(h)
-                nf.layers[i].data['h'] = h
-                nf.block_compute(i,
-                                 fn.copy_src(src='h', out='m'),
-                                 lambda node: {'h': node.mailbox['m'].mean(dim=1)},
-                                 layer)
+            h = nf.layers[i].data.pop('activation')
+            # 第0层先只聚合
+            if self.dropout:
+                h = self.dropout(h)
+            nf.layers[i].data['h'] = h
+            nf.block_compute(0,
+                             fn.copy_src(src='h', out='m'),
+                             lambda node: {'h': node.mailbox['m'].mean(dim=1)})
+
+            h = nf.layers[i].data.pop('h')
+            if self.dropout:
+                h = self.dropout(h)
+            nf.layers[i].data['h'] = h
+            print(len(nf.layers[i].data['h'][0]))
+            print(layer)
+            nf.block_compute(1, fn.copy_src(src='h', out='m'), lambda node: {'h': node.mailbox['m'].mean(dim=1)}, layer)
+
         h = nf.layers[-1].data.pop('activation')
         return h
 
@@ -319,7 +310,7 @@ new_train_id = np.array(new_train_id)
 
 # '''training'''
 
-model2 = GCNSampling2(in_feats, n_hidden, n_classes, n_layers, F.relu, dropout)
+model2 = GCNSampling2( n_hidden, n_classes, F.relu, dropout)
 #
 if cuda:
     model2.cuda()
